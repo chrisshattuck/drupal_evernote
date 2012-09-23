@@ -1,0 +1,5 @@
+; $Id: evernote.info,v 1.1 2010/07/07 21:54:15 stompeers Exp $
+name = Evernote
+description = Import and sync notes from Evernote
+package = Evernote
+core = 6.x

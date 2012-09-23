@@ -1,0 +1,78 @@
+<?php
+// $Id: evernote.install,v 1.1 2010/07/07 21:54:15 stompeers Exp $
+
+
+/**
+ * @file Rules - Installation file.
+ */
+
+/**
+ * Implementation of hook_install().
+ */
+function evernote_install() {
+  drupal_install_schema('evernote');
+  
+   // Check for vocabulary, and create evernote vocab if it doesn't exist already.
+  if (!db_result(db_query("SELECT vid FROM {vocabulary} WHERE name = 'Evernote'"))) {
+    $vocabulary = array(
+      'name' => "Evernote", //Human readable name of the vocabulary
+      'description' => "Created by the Evernote module, includes Evernote tags.", //Human readable name of the vocabulary
+      'multiple' => 1, //set 1 to allow multiple selection
+      'required' => 0, //set 1 to make the terms mandatory to be selected
+      'hierarchy' => 0, //set 1 to allow and create hierarchy of the terms within the vocabulary
+      'relations' => 0, //set 1 to set and allow relation amongst multiple terms
+      'module' => 'evernote', //provide the module name in which the vocabulary is defined and which is calling this function
+      'weight' => -9, //set the weight to display the vocabulary in the list
+    );
+    taxonomy_save_vocabulary($vocabulary);
+    variable_set('evernote_vocabulary', db_result(db_query("SELECT vid FROM {vocabulary} WHERE name = 'Evernote'")));
+  }
+  
+}
+
+/**
+ * Implementation of hook_uninstall().
+ */
+function evernote_uninstall() {
+  drupal_uninstall_schema('evernote');
+  db_query("DELETE FROM {variable} WHERE name LIKE 'evernote_%'");
+  taxonomy_del_vocabulary(db_result(db_query("SELECT vid FROM {vocabulary} WHERE name = 'Evernote'")));
+}
+
+function evernote_schema() {
+  $schema['evernote_nodes'] = array(
+    'description' => t('TODO: please describe this table!'),
+    'fields' => array(
+      'nid' => array(
+        'description' => t('TODO: please describe this field!'),
+        'type' => 'int',
+        'not null' => FALSE,
+      ),
+      'note_guid' => array(
+        'description' => t('TODO: please describe this field!'),
+        'type' => 'varchar',
+        'length' => '250',
+        'not null' => FALSE,
+      ),
+    ),
+  );
+
+  $schema['evernote_tags'] = array(
+    'description' => t('TODO: please describe this table!'),
+    'fields' => array(
+      'tid' => array(
+        'description' => t('TODO: please describe this field!'),
+        'type' => 'serial',
+        'not null' => TRUE,
+      ),
+      'tag_guid' => array(
+        'description' => t('TODO: please describe this field!'),
+        'type' => 'varchar',
+        'length' => '250',
+        'not null' => FALSE,
+      ),
+    ),
+  );
+
+  return $schema;
+}

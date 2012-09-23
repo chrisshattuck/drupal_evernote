@@ -1,0 +1,432 @@
+<?php
+
+// Need to do this up here, but don't know why exactly.
+use EDAM\NoteStore\NoteStoreClient;
+use EDAM\Error\EDAMSystemException, EDAM\Error\EDAMUserException, EDAM\Error\EDAMErrorCode;
+
+
+/**
+ * Implementation of hook_menu().
+ */
+function evernote_menu() {
+  $items = array();
+
+  $items['admin/settings/evernote'] = array(
+    'title' => 'Evernote Settings',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('evernote_admin_settings_form'),
+    'access arguments' => array('administer evernote'),
+    'file' => 'evernote.admin.inc',
+  );
+  
+  return $items;
+}
+
+
+/**
+ * Pulls in functions and constants to connect to Evernote server.
+ */
+function evernote_connect() {
+  include_once(drupal_get_path('module', 'evernote') . '/connect.inc');
+}
+
+/**
+ * Implementation of hook_perm().
+ */
+function evernote_perm() {
+  return array('administer evernote');
+}
+  
+/**
+ * Gets the noteStore object to use with the Evernote API
+ */
+function evernote_get_notestore() {
+  
+  static $noteStore;
+  if ($noteStore) {
+    return $noteStore;
+  }
+  
+  if (isset($_GET['oauth_verifier'])) {
+    variable_set('evernote_oauthVerifier', $_GET['oauth_verifier']);
+    $currentStatus = 'Content owner authorized the temporary credentials';
+  }
+  
+  getTokenCredentials();
+  
+  $parts = parse_url(variable_get('evernote_noteStoreUrl', ''));
+  if (!isset($parts['port'])) {
+    if ($parts['scheme'] === 'https') {
+      $parts['port'] = 443;
+    } else {
+      $parts['port'] = 80;
+    }
+  }
+
+  $noteStoreTrans = new THttpClient($parts['host'], $parts['port'], $parts['path'], $parts['scheme']);
+
+  $noteStoreProt = new TBinaryProtocol($noteStoreTrans);
+  $noteStore = new NoteStoreClient($noteStoreProt, $noteStoreProt);
+  if ($noteStore) {
+    return $noteStore;
+  } else {
+    return FALSE;
+  }
+}
+
+
+function evernote_sync($count = 100) {
+
+
+  evernote_connect();
+  $noteStore = evernote_get_notestore();
+  $authToken = variable_get('evernote_accessToken', '');
+  $vid = variable_get('evernote_vocabulary', '');
+  $account_to_add_as = user_load(array('name' => variable_get('evernote_uid', '')));
+  
+  $filter = new \EDAM\NoteStore\NoteFilter();
+  $filter->order = 'updated';
+  $filter->notebookGuid = variable_get('evernote_notebook', '');
+  $notes = $noteStore->findNotes($authToken, $filter, 0, $count);
+  
+  // Update tags
+  $tags = $noteStore->listTags($authToken);
+  foreach ($tags as $tag) {
+    $tag_guids[] = $tag->guid;
+    if ($tid = db_result(db_query("SELECT tid FROM {evernote_tags} WHERE tag_guid = '%s'", $tag->guid))) {
+      // Update any changes to the tag names (@TODO: maybe don't do this each time, could be expensive?)
+      db_query("UPDATE {term_data} SET name = '%s' WHERE tid = '%d'", $tag->name, $tid);
+    } else {
+      $term_data = array('vid' => $vid, 'name' => $tag->name);
+      drupal_write_record('term_data', $term_data);
+      $tid = db_last_insert_id('term_data', 'tid');
+      db_query("INSERT INTO {term_hierarchy} (tid, parent) VALUES ('%d', 0)", $tid);
+      db_query("INSERT INTO {evernote_tags} (tid, tag_guid) VALUES ('%d', '%s')", $tid, $tag->guid);
+    }
+  }
+  
+  
+  // Loop through each note and update or insert.
+  foreach ($notes->notes as $note) {
+    $is_new = FALSE;
+    $modified = FALSE;
+    $ocr_content = '';
+    
+    // Update
+    if ($evernote_node = db_fetch_array(db_query("SELECT * FROM {evernote_nodes} WHERE note_guid = '%s'", $note->guid))) {
+      if ($note->updateSequenceNum > $evernote_node['sequence']) {
+        $modified = TRUE;
+        $node = node_load($evernote_node['nid']);
+        $node->updated = ($note->updated / 1000);
+        db_query("UPDATE {evernote_nodes} SET sequence = '%d' WHERE nid = '%d'", $note->updateSequenceNum, $evernote_node['nid']);
+      }
+      
+    // Insert
+    } else {
+      
+      
+      
+      
+      // Create node
+      $is_new = TRUE;
+      $node = new stdClass();
+      $node->status = 1;
+      $node->uid = $account_to_add_as->uid;
+      $node->format = variable_get('evernote_body_format', '');
+      $title = $note->title;
+      $node->title = $title;
+      $node->created = ($note->created / 1000);
+      $node->updated = ($note->updated / 1000);
+      $title_field = variable_get('evernote_title_field', '');
+      if ($title_field != 'title') {
+        $node->{$title_field}[0]['value'] = $title;
+      }
+      $node->type = variable_get('evernote_content_type', '');
+      node_save($node);
+      
+      db_query("INSERT INTO {evernote_nodes} (nid, note_guid, sequence) VALUES ('%d', '%s', '%d')", $node->nid, $note->guid, $note->updateSequenceNum);
+      
+      $modified = TRUE;
+    }
+    
+    // If the node is unchanged, don't do any of this stuff.
+    if ($modified) {
+
+    
+    
+      // Get note details.
+      $note_info = $noteStore->getNote($authToken, $note->guid, 1, 1, 1, 1);
+    
+    
+    
+    
+      // Delete old files before getting resources
+      $file_fields = array(variable_get('evernote_image_field', ''), variable_get('evernote_file_field', ''));
+      foreach ($file_fields as $field) {
+        if ($field = content_fields($field)) {
+          if (isset($node->{$field['field_name']})) {
+            if (count($node->{$field['field_name']} > 0)) {
+              foreach ($node->{$field['field_name']} as $key => $file) {
+                unset($node->{$field['field_name']}[$key]);
+                field_file_delete($file, TRUE);
+              }
+            }
+          }
+        }
+      }
+      node_save($node); // @TODO: Find out if this is necessary.
+      
+      
+      
+      
+      
+      
+      
+      
+      // Add resources
+      $image_field_i = 0;
+      $file_field_i = 0;
+      foreach ($note_info->resources as $resource) {
+        $ocr_array = array(); // Reset OCR array
+        
+        // Get OCR data - we're picking the first choice of each word's possibilities so it's more
+        // reader-friendly.
+        if (isset($resource->recognition->body)) {
+          $ocr_content_array = explode('</item>', $resource->recognition->body);
+          foreach ($ocr_content_array as $item) {
+            $possibles = explode('</t>', $item);
+            $ocr_array[] = strip_tags($possibles[0]);
+          }
+          $ocr_content .= implode(' ', $ocr_array);
+        }
+            
+        $extension = end(explode('/', $resource->mime));
+        $url = variable_get('evernote_webApiUrlPrefix', '') .'/res/'. $resource->guid .'.'. $extension;
+        
+        $md5 = md5($resource->data->body);
+        $dir = file_directory_path() . '/evernote';
+        file_check_directory($dir, FILE_CREATE_DIRECTORY);
+
+        $filename = $md5 .'.'. $extension;
+        if ($resource->attributes->fileName != '') {
+          $filename = $resource->attributes->fileName;
+        }
+        $filepath =  $dir .'/'. $filename;
+        require_once('HTTP/Request.php');
+
+        $r = new HTTP_Request($url);
+        $r->addHeader('Cookie','auth='. $authToken);
+        $r->sendRequest();
+        $page = $r->getResponseBody();
+        $ch = curl_init($url);
+        $fp = fopen($filepath, 'wb');
+        fwrite($fp, $page);
+        
+        // Save to filefield
+        if (in_array($extension, array('gif', 'png', 'jpg', 'jpeg'))) {
+          $field = variable_get('evernote_image_field', '');
+          if (!isset($image_field_i)) {
+            $image_field_i = 0;
+          }
+          $hashes[$md5] = array(
+            'num' => $image_field_i,
+            'extension' => $extension,
+            'field' => $field,
+            'original' => $filepath,
+            'type' => 'image',
+          );
+          $image_field_i++;
+        } else {
+          $field = variable_get('evernote_file_field', '');
+          if (!isset($file_field_i)) {
+            $file_field_i = 0;
+          }
+          $hashes[$md5] = array(
+            'num' => $file_field_i,
+            'extension' => $extension,
+            'field' => $field,
+            'original' => $filepath,
+            'type' => 'file',
+          );
+          $file_field_i++;
+        }
+          
+        $field = content_fields($field);
+        
+        if ($path = $field['widget']['file_path']) {
+          if (module_exists('token')) {
+            global $user;
+            $path = token_replace($path, 'user', $user);
+          }
+          $path = '/'. $path;
+        }
+        // Allways return a good path
+        $destination_path = file_directory_path() . $path;
+        file_check_directory($destination_path, FILE_CREATE_DIRECTORY);
+        
+
+        // make sure we can access the file functions
+        module_load_include('inc', 'filefield', 'field_file' );
+      
+        // get the validators for this field
+        if ($field['widget']['module'] == 'imagefield') {
+          $validators = array_merge(filefield_widget_upload_validators($field), imagefield_widget_upload_validators($field));
+        }
+        else { $validators = filefield_widget_upload_validators($field);}
+      
+        // now get the new field
+        if (! $new_file = field_file_save_file($filepath, $validators, $destination_path)) {
+          watchdog('MM CCK', 'Could not save file with field_file_save_file() %file', array('%file' => print_r($file, true)), WATCHDOG_ERROR);
+          return;
+        }
+      
+        // we need to alter the file object slightly so it will display correctly
+        $new_file['data'] = array('description' => '');
+        // Do we list the file?
+        $new_file['list'] = $configuration['field_save_list'];
+      
+        // Add the file on to the node
+        // Do any files already exist on this node?
+        if (! is_array($node->{$field['field_name']})) {
+          $node->{$field['field_name']} = array($new_file);
+        }
+        elseif (! isset($node->{$field['field_name']}[0]))  {
+          $node->{$field['field_name']} = array($new_file);
+        }
+        // Files exist, append this file
+        else {
+          $node->{$field['field_name']}[] = $new_file;
+        }
+      } // End foreach ($resources)
+        
+      node_save($node); // Refresh file data again
+        
+        
+        
+        
+        
+        
+      // Replace images and files in content
+      unset($match);
+      preg_match('/<en-note(.*?)>(.*?)<\/en-note>/s',$note_info->content,$match); // Get the body
+      $body = $match[2];
+      
+      // Replace out all the resources with local images or remove them (two tag formats are used depending
+      // on where the note was created.)
+      preg_match_all('/<en-media(.*?)>(.*?)<\/en-media>/sx', $body, $media_matches);
+      preg_match_all('/<en-media(.*?)\/>/sx', $body, $media_matches_2);
+      $media_matches = array_merge($media_matches[0], $media_matches_2[0]);
+      foreach ($media_matches as $media_match) {
+        preg_match('/hash="(.*?)"/', $media_match, $hash);
+        $file_data = $hashes[$hash[1]];
+        if ($file_data['type'] == 'image') {
+          $body = str_replace($media_match, '<img src="'. base_path() . $node->{$file_data['field']}[$file_data['num']]['filepath'] .'" />', $body);
+        } else {
+          $body = str_replace($media_match, '', $body);
+        }
+        file_delete($file_data['original']);
+      }
+      
+      
+      // Additional formatting
+      // @TODO: This should be moved to a formatter
+      
+      // Replacement for breaks, so what appears looks more like what we input - particularly
+      // nice for Markdown
+      $body = str_replace(array('<div><br />'), array("\n"), $body);
+      $body = preg_replace('/<\/div>(.*?)\n(.*?)<div>/s', "\n", $body);
+      //$body = str_replace(array('<div>', '</div>'), array("\n", ''), $body);
+      $body = str_replace(array('<br/>', '<br />', '<br clear="none"/>', '</div>', '<div>'), array("\n", "\n",  "\n", "\n", ''), $body);
+      
+      // Filter executable code / markup
+      $code_delimiters_start = explode(',', variable_get('evernote_execute_start', '[c]'));
+      $code_delimiters_end = explode(',', variable_get('evernote_execute_end', '[/c]'));
+      foreach($code_delimiters_start as $key => $start) {
+        $end = $code_delimiters_end[$key];
+        $array = evernote_clean_up_delimiters(array($start, $end));
+        $body = preg_replace_callback('/'. $array[0] .'(.*?)'. $array[1] .'/s', "evernote_html_entity_decode", $body);
+      }
+      
+      // Filter code blocks
+      $code_block_start = explode(',', variable_get('evernote_code_block_start', '[co]'));
+      $code_block_end = explode(',', variable_get('evernote_code_block_end', '[/co]'));
+      foreach($code_block_start as $key => $start) {
+        $end = $code_block_end[$key];
+        $array = evernote_clean_up_delimiters(array($start, $end));
+        $body = preg_replace_callback('/'. $array[0] .'(.*?)'. $array[1] .'/s', "evernote_code_block", $body);
+      }
+      $body = preg_replace('/\`(.*?)\`/sx', "<pre><code>$1</code></pre>", $body);
+
+      
+      // Add a wrapper for easier styling
+      $body = '<div class="evernote">'. trim($body) . '</div>';
+      
+      
+      
+      // Save OCR
+      if (variable_get('evernote_ocr_field', '') != '') {
+        $node->{variable_get('evernote_ocr_field', '')}[0]['value'] = $ocr_content;
+      }
+      
+      
+      // Save body content
+      $node->body = $body;
+      $body_field = variable_get('evernote_body_field', '');
+      if ($body_field != 'body') {
+        $node->{$body_field}[0]['value'] = $body;
+        $node->{$body_field}[0]['format'] = $feed['format'];
+      }
+      $node->teaser = node_teaser($body);
+      node_save($node); // Save before doing taxonomy
+      
+      
+      
+      // Save taxonomy
+      // Unset tags so we can re-add them
+      unset($new_tags); // Reset this.
+      db_query("DELETE FROM {term_node} WHERE nid = '%d'", $node->nid);
+      $node->taxonomy = array();
+      // Add tags
+      foreach ($note_info->tagGuids as $tag_guid) {
+        $row = db_fetch_object(db_query("SELECT td.* FROM {evernote_tags} et LEFT JOIN {term_data} td ON et.tid = td.tid WHERE tag_guid = '%s'", $tag_guid));
+        $new_tags[$row->vid][] = $row->name;
+      }
+      foreach ($new_tags as $vid => $tag_list) {
+        $new_terms['tags'][$vid] = implode(',', $tag_list);
+      }
+      taxonomy_node_save($node, $new_terms);
+      $node->taxonomy = $new_terms;
+      node_save($node);
+      
+      
+      // @TODO: Make sure to replace internal links
+      
+    } // End if ($modified)
+    
+  } // End foreach ($note)
+  
+
+}
+
+
+function evernote_clean_up_delimiters($array) {
+  return str_replace(array('[', ']', '/', '>'), array('\[', '\]', '\/'), $array);
+}
+
+function evernote_html_entity_decode($matches) {
+  return html_entity_decode(strip_tags($matches[1]));
+}
+ 
+function evernote_code_block($matches) {
+  $content = $matches[1];
+  $content = trim($content, "\n");
+  return '<pre><code>'. $content .'</code></pre>';
+}
+
+function evernote_empty_tags($matches) {
+  return '';
+}
+
+function evernote_cron() {
+  evernote_sync(100);
+}

@@ -1,0 +1,1292 @@
+<?php
+// $Id: evernote.module,v 1.5.2.5 2010/07/15 21:48:36 stompeers Exp $
+
+define("EVERNOTE_CONSUMER_NAME", "Evernote Drupal Module");
+define("EVERNOTE_CONSUMER_KEY", "stompeers");
+define("EVERNOTE_CONSUMER_SECRET", "658fda08700dedb5");
+define("EVERNOTE_CONSUMER_WEB_KEY", "stompeers-web");
+define("EVERNOTE_CONSUMER_WEB_SECRET", "f96324581a773886");
+//define("EVERNOTE_SPHOSTNAME","https://sandbox.evernote.com");
+define("EVERNOTE_SPHOSTNAME","https://www.evernote.com");
+define("EVERNOTE_EVERNOTE_REQUEST_TOKEN_URL", EVERNOTE_SPHOSTNAME . "/oauth");
+define("EVERNOTE_EVERNOTE_ACCESS_TOKEN_URL", EVERNOTE_SPHOSTNAME . "/oauth");
+define("EVERNOTE_EVERNOTE_AUTHORIZATION_URL_BASE", EVERNOTE_SPHOSTNAME . "/OAuth.action");
+//define("EVERNOTE_NOTE_STORE_HOST", "sandbox.evernote.com");
+define("EVERNOTE_NOTE_STORE_HOST", "www.evernote.com");
+define("EVERNOTE_NOTE_STORE_PORT", "80");
+define("EVERNOTE_PORT", "443");
+define("EVERNOTE_NOTE_STORE_PROTOCOL", "https");
+define("EVERNOTE_NOTE_STORE_URL", "edam/note/");
+
+
+function evernote_includes() {
+  static $included;
+  if (isset($included)) {
+    return;
+  }
+  $included = true;
+  ini_set("include_path", ini_get("include_path") . ":" . "sites/all/libraries/evernote");
+  require_once("autoload.php");
+  require_once("Thrift.php");
+  require_once("transport/TTransport.php");
+  require_once("transport/THttpClient.php");
+  require_once("protocol/TProtocol.php");
+  require_once("protocol/TBinaryProtocol.php");
+  require_once("packages/Types/Types_types.php");
+  require_once("packages/UserStore/UserStore.php");
+  require_once("packages/NoteStore/NoteStore.php");
+  require_once("OAuth/SimpleRequest.php");
+}
+
+/**
+ * @file
+ * Everything that doesn't fit in its own module
+ */
+
+/**
+ * Implementation of hook_menu().
+ */
+function evernote_menu() {
+  $items = array();
+
+  $items['admin/settings/evernote'] = array(
+    'title' => 'Evernote Settings',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('evernote_admin_settings_form'),
+    'access arguments' => array('administer evernote'),
+  );
+  
+  $items['admin/evernote/authenticate'] = array(
+    'page callback' => 'evernote_authenticate_page',
+    'access arguments' => array('administer evernote'),
+  );
+  
+  $items['admin/build/evernote'] = array(
+    'title' => 'Evernote',
+    'page callback' => 'evernote_list_page',
+    'access arguments' => array('administer evernote'),
+  );
+
+  $items['admin/build/evernote/add'] = array(
+    'title' => 'Add Evernote feed',
+    'page callback' => 'evernote_add_page',
+    'access arguments' => array('administer evernote'),
+    'weight' => 2,
+    'type' => MENU_CALLBACK,
+  );
+
+  $items['admin/build/evernote/account-add'] = array(
+    'title' => 'Add Evernote account',
+    'page callback' => 'evernote_add_account_page',
+    'access arguments' => array('administer evernote'),
+  );
+  
+  $items['admin/build/evernote/delete'] = array(
+    'title' => 'Delete evernote content feed',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('evernote_delete_confirm'),
+    'access arguments' => array('administer evernote'),
+    'type' => MENU_CALLBACK,
+  );
+  
+  $items['admin/build/evernote/account-delete'] = array(
+    'title' => 'Delete evernote account',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('evernote_delete_account_confirm'),
+    'access arguments' => array('administer evernote'),
+    'type' => MENU_CALLBACK,
+  );
+
+  
+  return $items;
+}
+
+/**
+ * Build the admin settings form.
+ */
+function evernote_admin_settings_form() {
+  $form['delimeters'] = array(
+    '#type' => 'fieldset',
+    '#title' => 'Code delimiters',
+    '#description' => 'Evernote doesn\'t support blocks of literal HTML code, but we can use indicators of where code starts and ends. In addition, there are times when we want to display code wrapped in '. htmlentities('<pre><code>...</code></pre>') .' tags. You can use the default settings, or set your own code starting and ending delimiters. Setting your own can be handy depending on the style of writing you do, and from what device it comes from (i.e. writing <b>[code]</b> on an iPod is a challenge). You can even set multiple delimiters, just in case you start with one and want to move to another.',
+  );
+  $form['delimeters']['evernote_execute_start'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Executed code starting delimiter(s)'),
+    '#description' => t("Separate multiple values with commas. Note that each one should have a corresponding ending delimiter as well."),
+    '#default_value' => variable_get('evernote_execute_start', '[c]'),
+  );
+  $form['delimeters']['evernote_execute_end'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Executed code ending delimiter(s)'),
+    '#default_value' => variable_get('evernote_execute_end', '[/c]'),
+  );
+  $form['delimeters']['evernote_code_block_start'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Code block starting delimiter(s)'),
+    '#description' => t("Separate multiple values with commas. Note that each one should have a corresponding ending delimiter as well."),
+    '#default_value' => variable_get('evernote_code_block_start', '[co]'),
+  );
+  $form['delimeters']['evernote_code_block_end'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Code block ending delimiter(s)'),
+    '#default_value' => variable_get('evernote_code_block_end', '[/co]'),
+  );
+  $form['delimeters']['evernote_class_start'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Div with class starting delimiter(s)'),
+    '#description' => t("Separate multiple values with commas. Note that each one should have a corresponding ending delimiter. The text immediately following this delimiter followed by a space will be used for the class name."),
+    '#default_value' => variable_get('evernote_class_start', 'sclass:'),
+  );
+  $form['delimeters']['evernote_class_end'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Div with class ending delimiter(s)'),
+    '#default_value' => variable_get('evernote_class_end', 'eclass'),
+  );
+
+  return system_settings_form($form);
+}
+
+/**
+ * Render page for display add forms for feeds
+ */
+function evernote_add_page() {
+  drupal_set_title('Add feed');
+  if ($_GET['id']) {
+    drupal_set_title('Edit feed');
+  }
+  $output = drupal_get_form('evernote_feed_form');
+  return $output;
+}
+
+/**
+ * Render page for display add forms for accounts
+ */
+function evernote_add_account_page() {
+  drupal_set_title('Add account');
+  if ($_GET['id']) {
+    drupal_set_title('Edit account');
+  }
+  $output = drupal_get_form('evernote_account_form');
+  return $output;
+}
+
+/**
+ * Grabs the settings for the feed
+ */
+function evernote_get_feed_settings($id) {
+  $row = db_fetch_array(db_query("
+    SELECT f.*, a.username, a.password FROM {evernote_feeds} f
+    LEFT JOIN {evernote_accounts} a ON f.evernote_aid = a.evernote_aid
+    WHERE evernote_fid = '%d'", $id));
+  $settings = unserialize($row['feed_settings']);
+  $row = array_merge($row, $settings);
+  return $row;
+}
+
+/**
+ * Submission handler for campaign create / edit form
+ */
+function evernote_feed_form_submit(&$form, &$form_state) {
+  global $user;
+  $settings = $form_state['values'];
+  $settings['add_as_uid'] = user_load(array('name' => $settings['add_as_uid']))->uid;
+  $aid = $settings['evernote_aid'];
+  $name = $settings['name'];
+  $unset = array('op', 'submit', 'form_build_id', 'form_id', 'name', 'evernote_aid');
+  foreach ($unset as $item) {
+    unset($settings[$item]);
+  }
+  $settings = serialize($settings);
+  
+  if (!isset($_GET['id'])) {
+     db_query("INSERT INTO {evernote_feeds} (evernote_aid, name, feed_settings) VALUES ('%d', '%s', '%s')", $aid, $name, $settings);
+    drupal_set_message('Your feed was created. Content will be added on the next cron run.');
+  } else { // Update existing
+     db_query("UPDATE {evernote_feeds} SET evernote_aid = '%d', name = '%s', feed_settings = '%s' WHERE evernote_fid = '%d'", $aid, $name, $settings, $_GET['id']);
+    drupal_set_message('Your feed has been edited and saved');
+  }
+}
+
+/**
+ * Create a destination path for a file (stolen from media_mover)
+ * @param $field
+ * @return unknown_type
+ */
+function evernote_field_widget_files_directory($field) {
+  // base configuration
+  $path = media_mover_api_dir_path() .'/mm_cck/';
+  if ($path = $field['widget']['file_path']) {
+    if (module_exists('token')) {
+      global $user;
+      $path = token_replace($path, 'user', $user);
+    }
+    $path = '/'. $path;
+  }
+  // Allways return a good path
+  $path = file_directory_path() . $path;
+  file_check_directory($path, FILE_CREATE_DIRECTORY);
+  return $path;
+}
+
+/**
+ * Submission handler for campaign create / edit form
+ */
+function evernote_account_form_submit(&$form, &$form_state) {
+  $settings = $form_state['values'];
+  
+  //$feeds = variable_get('evernote_feeds', array());
+  if (!isset($_GET['id'])) {
+    db_query("INSERT INTO {evernote_accounts} (name, username, password, access_token, shard_id) VALUES ('%s', '%s', '%s', '%s', '%s')", $settings['name'], $settings['username'], $settings['password'], $settings['access_token'], $settings['shard_id']);
+    //$new_feed[$id] = $settings;
+    //$feeds = array_merge($feeds, $new_feed);
+    drupal_set_message('The account was added.');
+  } else { // Update existing
+    if ($settings['remove'] == 1) {
+      $settings['access_token'] = '';
+      $settings['shard_id'] = '';
+    }
+    db_query("UPDATE {evernote_accounts} SET name = '%s', username = '%s', password = '%s', access_token = '%s', shard_id = '%s'", $settings['name'], $settings['username'], $settings['password'], $settings['access_token'], $settings['shard_id']);
+    drupal_set_message('The account has been edited and saved');
+  }
+  //variable_set('evernote_feeds', $feeds);
+}
+
+/**
+ * Menu callback: confirm deleting of feed
+ */
+function evernote_delete_confirm() {
+  $settings = evernote_get_feed_settings($_GET['id']);
+  return confirm_form(array(), t('Are you sure you want to delete the "'. $settings['name'] .'" feed?'), 'admin/build/evernote', '<p>'. t('Confirming deletion...') .'</p>', t('Delete feed'), t('Cancel'));
+}
+
+/**
+ * Submission of confirm feed delete form
+ */
+function evernote_delete_confirm_submit() {
+  if (user_access('administer evernote')) {
+    db_query("DELETE FROM {evernote_feeds} WHERE evernote_fid = '%d'", $_GET['id']);
+    db_query("DELETE FROM {evernote_nodes} WHERE evernote_fid = '%d'", $_GET['id']);
+    drupal_set_message('The feed has been deleted');
+    drupal_goto('admin/build/evernote');
+    // Delete listing note
+    $node_guid = variable_get('evernote_fid_'. $_GET['id'].'_listing_guid');
+    variable_del('evernote_fid_'. $_GET['id'].'_listing_guid');
+  }
+}
+
+/**
+ * Menu callback: confirm deleting of feed
+ */
+function evernote_delete_account_confirm() {
+  $settings = evernote_get_account_settings($_GET['id']);
+  return confirm_form(array(), t('Are you sure you want to delete the "'. $settings['name'] .'" account?'), 'admin/build/evernote', '<p>'. t('IMPORTANT: Any feeds associated with this account will also be deleted, but the imported content will remain.') .'</p>', t('Delete account'), t('Cancel'));
+}
+
+/**
+ * Submission of confirm feed delete form
+ */
+function evernote_delete_account_confirm_submit() {
+  if (user_access('administer evernote')) {
+    db_query("DELETE FROM {evernote_accounts} WHERE evernote_aid = '%d'", $_GET['id']);
+    db_query("DELETE FROM {evernote_terms} WHERE evernote_aid = '%d'", $_GET['id']);
+    db_query("DELETE FROM {evernote_feeds} WHERE evernote_aid = '%d'", $_GET['id']);
+    drupal_set_message('The account and associated feeds have been deleted');
+    drupal_goto('admin/build/evernote');
+  }
+}
+
+function evernote_get_account_settings($id) {
+  $row = db_fetch_array(db_query("
+    SELECT * FROM {evernote_accounts}
+    WHERE evernote_aid = '%d'", $id));
+  return $row;
+}
+
+function evernote_account_form(&$form_state) {
+  evernote_includes();
+  $settings = array();
+  $action = 'add';
+  if ($_GET['id'] != '') {
+    $settings = evernote_get_account_settings($_GET['id']);
+    $id_query_string = '&id='. $_GET['id'];
+    $action = 'edit';
+    $_SESSION['evernote_id'] = $_GET['id'];
+  }
+  $form['#redirect'] = 'admin/build/evernote';
+
+  
+  // Step 2 of the authorization process
+  if ($_GET['action'] == 'get_access_token') {
+    $oauthRequestor = new OAuth_SimpleRequest(EVERNOTE_EVERNOTE_REQUEST_TOKEN_URL, EVERNOTE_CONSUMER_WEB_KEY, EVERNOTE_CONSUMER_WEB_SECRET);
+    $oauthRequestor->setParameter("oauth_token", $_SESSION['requestToken']);
+    
+    try {
+      $oauthRequestor->sendRequest();
+      $reply = $oauthRequestor->getResponseStruct();
+      $settings['access_token'] = $reply['oauth_token'];
+      $settings['shard_id'] = $reply['edam_shard'];
+      unset($_SESSION['requestToken']);
+    } catch (HTTP_Exception $e) {
+    }
+    
+  }
+  
+  //$token = ($settings['access_token'] != '') ? $settings['access_token'] : $form_state['post']['access_token'];
+  //$shard_id = ($settings['shard_id'] != '') ? $settings['shard_id'] : $form_state['post']['shard_id'];
+  $token = ($form_state['post']['access_token'] != '') ? $form_state['post']['access_token'] : $settings['access_token'];
+  $shard_id = ($form_state['post']['shard_id'] != '') ? $form_state['post']['shard_id'] : $settings['shard_id'];
+  //$shard_id = ($settings['shard_id'] != '') ? $settings['shard_id'] : $form_state['post']['shard_id'];
+  
+  // Checking to see if the authorization is good. @TODO: I'm sure there's a better way to
+  // do this.
+  try {
+    $noteStore = evernote_get_notestore_object($shard_id);
+    $notebooks = $noteStore->listNotebooks($token);
+  } catch (Exception $e) {
+    $oauthRequestor = new OAuth_SimpleRequest(EVERNOTE_EVERNOTE_REQUEST_TOKEN_URL, EVERNOTE_CONSUMER_WEB_KEY, EVERNOTE_CONSUMER_WEB_SECRET);
+    try {
+      $oauthRequestor->sendRequest();
+      $r = $oauthRequestor->getResponseStruct();
+      $reply = $oauthRequestor->getResponseStruct();
+      if (isset($reply['oauth_token'])) {
+        $_SESSION['requestToken'] = $reply['oauth_token'];
+      }
+    } catch (HTTP_Exception $e) {
+      $test = '';
+    }
+    $form['validation_iframe'] = array(
+      '#type' => 'markup',
+      '#value' => '<div><label>Authenticate</label><p>Before we can pull data from your account, we need you to authenticate with Evernote. This authentication will last for 1 year, after which you will need to log in again.</p><iframe name="iframe1" src="'. EVERNOTE_SPHOSTNAME .'/OAuth.action?oauth_callback='. url('admin/evernote/authenticate/'. $action, array('absolute' => TRUE)) .'&oauth_token='. $_SESSION['requestToken'] . $id_query_string .'&format=microclip" frameborder="1" scrolling="no" width="400" height="200"></iframe></div>',
+    );
+  }
+  
+  if (!isset($form['validation_iframe'])) {
+    $form['remove'] = array(
+      '#type' => 'checkbox',
+      '#title' => 'Remove credentials',
+      '#description' => 'If you would like to remove the credentials for this account on this site, check this box.',
+    );
+  }
+  
+  $form['name'] = array(
+    '#type' => 'textfield',
+    '#required' => TRUE,
+    '#title' => t('Name'),
+    '#default_value' => isset($settings['name']) ? $settings['name'] : '',
+    '#description' => t('The name of the account for the listing page.'),
+  );
+  
+  $form['access_token'] = array(
+    '#type' => 'hidden',
+    '#value' => $token,
+  );
+  $form['shard_id'] = array(
+    '#type' => 'hidden',
+    '#value' => $shard_id,
+  );
+  $form['user_pass'] = array(
+    '#type' => 'fieldset',
+    '#title' => 'Store username and password',
+    '#description' => 'Alternately, you can store the Evernote username and password in the database to avoid having to re-authenticate after a year.',
+  );
+  $form['user_pass']['username'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Evernote username'),
+    '#default_value' => isset($settings['password']) ? $settings['password'] : '',
+  );
+  $form['user_pass']['password'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Evernote password'),
+    '#default_value' => isset($settings['username']) ? $settings['username'] : '',
+  );
+  
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Save account'),
+  );
+  
+  return $form;
+}
+
+function evernote_feed_form(&$form_state) {
+  evernote_includes();
+  $settings = array();
+  $action = 'add';
+  if ($_GET['id'] != '') {
+    $settings = evernote_get_feed_settings($_GET['id']);
+  }
+  $aid = isset($settings['evernote_aid']) ? $settings['evernote_aid'] : $_GET['account_id'];
+  $account_settings = evernote_get_account_settings($aid);
+  $form['#redirect'] = 'admin/build/evernote';
+  
+  if ($account_settings['username'] != '' && $account_settings['password'] != '') {
+    evernote_set_user_token_and_shard($account_settings);
+  }
+  $token = $account_settings['access_token'];
+  $shard_id = $account_settings['shard_id'];
+  
+  // Checking to see if the authorization is good. @TODO: I'm sure there's a better way to
+  // do this.
+  try {
+    $noteStore = evernote_get_notestore_object($shard_id);
+    $notebooks = $noteStore->listNotebooks($token);
+  } catch (Exception $e) {
+    $form['error'] = array(
+      '#type' => 'markup',
+      '#value' => '<h4>Error accessing account</h4><p>It looks like we were not able to access your account. You may need to re-authenticate before adding a feed. '. l('Click here to modify the account settings', 'admin/build/evernote/add-account', array('query', 'id='. $settings['evernote_aid'])),
+    );
+  }
+  
+  if (isset($form['error'])) {
+    return $form;
+  }
+  
+  $form['name'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Name'),
+    '#required' => TRUE,
+    '#default_value' => isset($settings['name']) ? $settings['name'] : '',
+    '#description' => t('The name of the feed for the listing page.'),
+  );
+  $form['description'] = array(
+    '#type' => 'textarea',
+    '#title' => t('Description'),
+    '#default_value' => isset($settings['description']) ? $settings['description'] : '',
+    '#description' => t('A brief description of the feed for the listing page.'),
+  );
+  $form['evernote_aid'] = array(
+    '#type' => 'value',
+    '#value' => $aid,
+  );
+  
+  $form['fields'] = array(
+    '#type' => 'fieldset',
+    '#title' => 'Import options',
+  );
+  
+  $types = node_get_types();
+  foreach($types as $type) {
+    $type_options[$type->type] = $type->name .' ('. $type->type .')';
+  }
+  $form['fields']['content_type'] = array(
+    '#type' => 'select',
+    '#title' => t('Content type'),
+    '#options' => $type_options,
+    '#default_value' => isset($settings['content_type']) ? $settings['content_type'] : 'page',
+    '#description' => t('The node type that evernote notes will be added as.'),
+  );
+  
+  if ($settings['add_as_uid']) {
+    $add_as = user_load(array('uid' => $settings['add_as_uid']))->name;
+  }
+  $form['fields']['add_as_uid'] = array(
+    '#type' => 'textfield',
+    '#title' => t('User to add new entries as'),
+    '#size' => 30,
+    '#maxlength' => 60,
+    '#autocomplete_path' => 'user/autocomplete',
+    '#default_value' => $add_as,
+  );
+  
+  $form['fields']['published'] = array(
+    '#type' => 'radios',
+    '#title' => t('Create new nodes as'),
+    '#options' => array(0 => 'Unpublished', 1 => 'Published'),
+    '#default_value' => isset($settings['published']) ? $settings['published'] : '1',
+  );
+  
+  $fields = content_fields();
+  $imagefield_options[''] = '';
+  $filefield_options[''] = '';
+  foreach ($fields as $key => $field) {
+    if ($field['type'] == 'text') {
+      $field_options[$key] = $field['widget']['label'] .' ('. $key .')';
+    }
+    if ($field['type'] == 'filefield' && $field['widget']['module'] != 'imagefield') {
+      $filefield_options[$key] = $field['widget']['label'] .' ('. $key .')';
+    }
+    if ($field['type'] == 'filefield' && $field['widget']['module'] == 'imagefield') {
+      $imagefield_options[$key] = $field['widget']['label'] .' ('. $key .')';
+    }
+  }
+  $title_field_options = array('title' => 'Title');
+  if (is_array($field_options)) {
+    $title_field_options = array_merge($title_field_options, $field_options);
+  }
+  $form['fields']['title_field'] = array(
+    '#type' => 'select',
+    '#title' => t('Title field'),
+    '#options' => $title_field_options,
+    '#default_value' => isset($settings['title_field']) ? $settings['title_field'] : 'title',
+    '#description' => t('Select the field where the title of the Evernote note will be entered. Note that even if you select a CCK field, the title will also be saved to the node title as well.'),
+  );
+  
+  $form['fields']['evernote_body'] = array(
+    '#type' => 'fieldset',
+    '#title' => 'Body field',
+  );
+  
+  $body_field_options = array('body' => 'Body');
+  if (is_array($field_options)) {
+    $body_field_options = array_merge($body_field_options, $field_options);
+  }
+  $form['fields']['evernote_body']['body_field'] = array(
+    '#type' => 'select',
+    '#options' => $body_field_options,
+    '#default_value' => isset($settings['body_field']) ? $settings['body_field'] : 'body',
+    '#description' => t('Select the field where the content of the Evernote note will be entered. Note that even if you select a CCK field, the content will also be saved to the node body as well.'),
+  );
+  $default_format = isset($settings['format']) ? $settings['format'] : FILTER_FORMAT_DEFAULT;
+  $form['fields']['evernote_body']['format'] = filter_form($default_format, '10', array('format'));
+  
+  
+  $form['fields']['image_field'] = array(
+    '#title' => t('Image field'),
+    '#type' => 'select',
+    '#options' => $imagefield_options,
+    '#default_value' => isset($settings['image_field']) ? $settings['image_field'] : '',
+    '#description' => t('Select the field where associated images will be stored.'),
+  );
+  $form['fields']['file_field'] = array(
+    '#title' => t('File field'),
+    '#type' => 'select',
+    '#options' => $filefield_options,
+    '#default_value' => isset($settings['file_field']) ? $settings['file_field'] : '',
+    '#description' => t('Select the field where associated non-image files will be stored.'),
+  );
+  
+  $url_field_options = array('' => '');
+  if (is_array($field_options)) {
+    $url_field_options = array_merge($url_field_options, $field_options);
+  }
+  $form['fields']['url_field'] = array(
+    '#title' => t('Source URL field'),
+    '#type' => 'select',
+    '#options' => $url_field_options,
+    '#default_value' => isset($settings['url_field']) ? $settings['url_field'] : '',
+    '#description' => t('Select the field where the source URL will be stored.'),
+  );
+  
+  $ocr_field_options = array('' => '', 'body' => 'Add to body in a div wrapper');
+  if (is_array($field_options)) {
+    $ocr_field_options = array_merge($ocr_field_options, $field_options);
+  }
+  $form['fields']['ocr_field'] = array(
+    '#type' => 'select',
+    '#title' => t('OCR text field'),
+    '#options' => $ocr_field_options,
+    '#default_value' => isset($settings['ocr_field']) ? $settings['ocr_field'] : 'title',
+    '#description' => t('Select the field where any text that has been OCR-ed from an image or other resource by Evernote will be stored.'),
+  );
+  
+  
+  
+  $form['data_source'] = array(
+    '#type' => 'fieldset',
+    '#title' => 'Data source',
+    '#description' => 'You can use a saved search, a notebook, or a notebook / tag combination to determine what content gets pulled for this feed.',
+  );
+  $noteStore = evernote_get_notestore_object($shard_id);
+  
+  $searches = $noteStore->listSearches($token);
+  $search_options[''] = '';
+  foreach ($searches as $search) {
+    $search_options[$search->guid] = $search->name;
+  }
+  $form['data_source']['search_guid'] = array(
+    '#type' => 'select',
+    '#title' => t('Search'),
+    '#options' => $search_options,
+    '#default_value' => isset($settings['search_guid']) ? $settings['search_guid'] : '',
+  );
+  
+  $notebooks = $noteStore->listNotebooks($token);
+  $notebook_options[''] = '';
+  foreach ($notebooks as $notebook) {
+    $notebook_options[$notebook->guid] = $notebook->name;
+  }
+  $form['data_source']['notebook_guid'] = array(
+    '#type' => 'select',
+    '#title' => t('Notebook'),
+    '#options' => $notebook_options,
+    '#default_value' => isset($settings['notebook_guid']) ? $settings['notebook_guid'] : '',
+    '#description' => t('Optionally select which notebook to pull notes from. If this is set, the notebook will automatically get a note which lists all the nodes created by this feed for easy inter-linking.'),
+  );
+  $tags = $noteStore->listTags($token);
+  $tag_options[''] = '';
+  foreach ($tags as $tag) {
+    $tag_options[$tag->guid] = $tag->name;
+  }
+  $form['data_source']['tag_guid'] = array(
+    '#type' => 'select',
+    '#title' => t('Tag'),
+    '#options' => $tag_options,
+    '#default_value' => isset($settings['tag_guid']) ? $settings['tag_guid'] : '',
+    '#description' => t('You can further specify which entries should be pulled by entering a specific tag'),
+  );
+  
+  $form['tags'] = array(
+    '#type' => 'fieldset',
+    '#title' => 'Tags',
+  );
+  
+  $vocabularies = taxonomy_get_vocabularies();
+  foreach ($vocabularies as $key => $vocabulary) {
+    $vocabulary_options[$key] = $vocabulary->name;
+  }
+  $form['tags']['vid'] = array(
+    '#type' => 'select',
+    '#title' => t('Main vocabulary'),
+    '#options' => $vocabulary_options,
+    '#default_value' => isset($settings['vid']) ? $settings['vid'] : '',
+    '#description' => t('Select the vocabulary you would like to store main Evernote tags in. These would typically be tags you would want to display to the public.'),
+  );
+  $form['tags']['vid_secondary_prefix'] = array(
+    '#type' => 'textfield',
+    '#size' => 10,
+    '#default_value' => isset($settings['vid_secondary_prefix']) ? $settings['vid_secondary_prefix'] : '*',
+    '#title' => 'Secondary vocabulary prefix',
+    '#description' => 'Any terms with this prefix will be saved to the secondary vocabulary instead of the main one.',
+  );
+  $form['tags']['vid_secondary'] = array(
+    '#type' => 'select',
+    '#title' => t('Secondary vocabulary'),
+    '#options' => $vocabulary_options,
+    '#default_value' => isset($settings['vid_secondary']) ? $settings['vid_secondary'] : '',
+    '#description' => t('These would typically be tags that would be used for organization or triggers rather than for public-facing organization.'),
+  );
+  
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Save feed'),
+  );
+  
+  return $form;
+}
+
+function evernote_user_store($user, $pass) {
+  static $authResult;
+  if (isset($authResult[$user])) {
+    return $authResult[$user];
+  }
+  $userStoreHttpClient = new THttpClient(EVERNOTE_NOTE_STORE_HOST, EVERNOTE_PORT, "/edam/user", EVERNOTE_NOTE_STORE_PROTOCOL);
+  $userStoreProtocol = new TBinaryProtocol($userStoreHttpClient);
+  $userStore = new UserStoreClient($userStoreProtocol, $userStoreProtocol);
+  try {
+    $authResult[$user] = $userStore->authenticate($user, $pass, EVERNOTE_CONSUMER_KEY, EVERNOTE_CONSUMER_SECRET);
+  } catch (Exception $e) {
+    drupal_set_message(t('Cannot authenticate with this username and password'), 'error');
+  }
+  return $authResult[$user];
+}
+
+function evernote_set_user_token_and_shard(&$data) {
+  if ($data['username'] == '' && $data['password'] == '') {
+    $row = db_fetch_array(db_query("SELECT a.evernote_aid, a.username, a.password FROM {evernote_feeds} f LEFT JOIN {evernote_accounts} a ON f.evernote_aid = a.evernote_aid WHERE f.evernote_fid = '%d'", $data['evernote_fid']));
+    $user_store = evernote_user_store($row['username'], $row['password']);
+  } else {
+    $user_store = evernote_user_store($data['username'], $data['password']);
+  }
+  $aid = isset($row['evernote_aid']) ? $row['evernote_aid'] : $data['evernote_aid'];
+  db_query("UPDATE {evernote_accounts} SET access_token = '%s', shard_id = '%s' WHERE evernote_aid = '%d'", $user_store->authenticationToken, $user_store->user->shardId, $aid);
+  $data['access_token'] = $user_store->authenticationToken;
+  $data['shard_id'] = $user_store->user->shardId;
+}
+  
+
+function evernote_list_page() {
+  // Get accounts
+  $account_result = db_query("SELECT * FROM {evernote_accounts}");
+  
+  while ($row = db_fetch_array($account_result)) {
+     $account_rows[] = array(
+      $row['name'],
+      l('Add feed', 'admin/build/evernote/add', array('query' => 'account_id='. $row['evernote_aid'])),
+      l('Edit', 'admin/build/evernote/account-add', array('query' => 'id='. $row['evernote_aid'])),
+      l('Delete', 'admin/build/evernote/account-delete', array('query' => 'id='. $row['evernote_aid'])),
+    );
+  }
+  if (isset($account_rows)) {
+    $account_table = '<h3>Evernote accounts</h3>'. theme('table', array('Name', 'Add feed', 'Edit', 'Delete'), $account_rows) . '<p>'. l('Add another account &gt;&gt;', 'admin/build/evernote/account-add', array('html' => true)) .'</p>';
+  } else {
+    $account_table = '<p>First, '. l('add an Evernote account', 'admin/build/evernote/account-add') .'.</p>';
+  }
+  
+  // Get feeds
+  $feed_result = db_query("SELECT a.name as account, f.* FROM {evernote_feeds} f LEFT JOIN {evernote_accounts} a ON f.evernote_aid = a.evernote_aid");
+  while ($row = db_fetch_array($feed_result)) {
+    $row = array_merge(evernote_get_feed_settings($row['evernote_fid']), $row);
+    
+     $feed_rows[] = array(
+      $row['name'],
+      $row['account'],
+      $row['content_type'],
+      $row['description'],
+      l('Edit', 'admin/build/evernote/add', array('query' => 'id='. $row['evernote_fid'])),
+      l('Delete', 'admin/build/evernote/delete', array('query' => 'id='. $row['evernote_fid'])),
+    );
+  }
+  if (isset($feed_rows)) {
+    $feed_table = '<h3>Feeds</h3>'. theme('table', array('Name', 'Account', 'Type', 'Description', 'Edit', 'Delete'), $feed_rows);
+  }
+  return $header . $feed_table . $account_table;
+}
+
+function evernote_authenticate_page() {
+  if (arg(3) == 'edit') {
+    $id_query = '&id='. $_SESSION['evernote_id'];
+    unset($_SESSION['evernote_id']);
+  }
+  $url = url('admin/build/evernote/account-add', array('query' => 'action=get_access_token'. $id_query));
+  echo '<a href=\'javascript: top.location="'. $url .'"\'>You have been authenticated! Click this link to complete the process.</a>';
+}
+
+function evernote_get_notestore_object($shard_id) {
+  static $noteStore;
+  if (isset($noteStore[$shard_id])) {
+    return $noteStore[$shard_id];
+  }
+  $port = EVERNOTE_NOTE_STORE_PORT;
+  $noteStoreTrans = new THttpClient(EVERNOTE_NOTE_STORE_HOST, EVERNOTE_NOTE_STORE_PORT, EVERNOTE_NOTE_STORE_URL . $shard_id, EVERNOTE_NOTE_STORE_PROTOCOL);
+  $noteStoreProt = new TBinaryProtocol($noteStoreTrans);
+  $noteStore[$shard_id] = new NoteStoreClient($noteStoreProt, $noteStoreProt);
+  return $noteStore[$shard_id];
+}
+
+
+
+function evernote_create_dir($full_dir) {
+  $dir_array = explode('/', $full_dir);
+  foreach ($dir_array as $dir) {
+    $dir_build .= $slash . $dir;
+    $slash = '/';
+    if (!is_dir($dir_build)) {
+      mkdir($dir_build);
+    }
+  }
+}
+
+function evernote_cron() {
+  echo 'Starting cron ';
+  evernote_includes();
+  $all_feeds_result = db_query("SELECT * FROM {evernote_feeds} f LEFT JOIN {evernote_accounts} a ON f.evernote_aid = a.evernote_aid");
+  while ($feed = db_fetch_array($all_feeds_result)) {
+    $settings = evernote_get_feed_settings($feed['evernote_fid']);
+    $feed = array_merge($feed, $settings);
+    $updated_notes = false;
+    // If it's a stored username and password, update the auth and shard
+    if ($feed['username'] != '' && $feed['password'] != '') {
+      evernote_set_user_token_and_shard($feed);
+    }
+    $token = $feed['access_token'];
+    
+    // Get notes
+    $result = db_query("SELECT * FROM {evernote_nodes} WHERE {evernote_fid} = '%d'", $feed['evernote_fid']);
+    $noteStore = evernote_get_notestore_object($feed['shard_id']);
+    $filter = new edam_notestore_NoteFilter();
+    if ($feed['notebook_guid'] != '') {
+      $filter->notebookGuid = $feed['notebook_guid'];
+    }
+    if ($feed['search_guid'] != '') {
+      $search = $noteStore->getSearch($token, $feed['search_guid']);
+      $filter->words = $search->query;
+    }
+    if ($feed['tag_guid'] != '') {
+      $filter->tagGuids = array($feed['tag_guid']);
+    }
+    $notes = $noteStore->findNotes($token, $filter, 0, 10000);
+    $tags = $noteStore->listTags($token);
+    foreach ($tags as $tag) {
+      $tag_guids[] = $tag->guid;
+      if ($row = db_fetch_array(db_query("SELECT * FROM {evernote_terms} et LEFT JOIN term_data t ON et.tid = t.tid WHERE et.evernote_aid = '%d' AND et.tag_guid = '%s'", $feed['evernote_aid'], $tag->guid))) {
+        // Check if it has been updated by checking sequence_num
+        // If so, then update term_data. If not, then update the tag
+        if ($row['name'] != $tag->name) { // If different, update
+          // If the user's tag has changed, change the term
+          if ($row['sequence_num'] != $tag->updateSequenceNum) {
+            db_query("UPDATE {term_data} SET name = '%s' WHERE tid = '%d'", $tag->name, $row['tid']);
+            db_query("UPDATE {evernote_terms} SET sequence_num = '%d' WHERE tag_guid = '%s'", $tag->updateSequenceNum, $tag->guid);
+          } else { // Otherwise, update the user's tag
+            $tag->name = $row['name'];
+            $noteStore->updateTag($token, $tag);
+          }
+        }
+      } else { // Add it in
+        // Try to find an existing term with same text
+        if (!$tid = db_result(db_query("SELECT tid FROM {term_data} WHERE name = '%s'", $tag->name))) {
+          $vid = $feed['vid'];
+          $prefix_length = strlen($feed['vid_secondary_prefix']);
+          if (substr($tag->name, 0, $prefix_length) == $feed['vid_secondary_prefix']) {
+            $vid = $feed['vid_secondary'];
+          }
+          $term_data = array('vid' => $vid, 'name' => $tag->name);
+          drupal_write_record('term_data', $term_data);
+          $tid = db_last_insert_id('term_data', 'tid');
+          db_query("INSERT INTO {term_hierarchy} (tid, parent) VALUES ('%d', 0)", $tid);
+        }
+        db_query("INSERT INTO {evernote_terms} (evernote_aid, tid, tag_guid, sequence_num) VALUES ('%d', '%d', '%s', '%d')", $feed['evernote_aid'], $tid, $tag->guid, $tag->updateSequenceNum);
+      }
+      $feed_tags[$tag->guid] = $tag->name;
+    }
+    // Delete unused tags
+    // Commented out because I don't think we should ever delete these from the evernote side of things
+    /*
+    $result = db_query("SELECT * FROM {evernote_terms} WHERE evernote_fid = '%d'", $feed['evernote_fid']);
+    while ($row = db_fetch_array($result)) {
+      if (!in_array($row['tag_guid'], $tag_guids)) {
+        taxonomy_del_term($row['tid']);
+        db_query("DELETE FROM {evernote_terms} WHERE tid = '%d' AND evernote_fid = '%d'", $row['tid'], $feed['evernote_fid']);
+      }
+    }
+    */
+    
+    // Deletion process
+    $note_guids = array(); // reset
+    foreach ($notes->notes as $note) { // Get list of guids
+      $note_guids[] = $note->guid;
+    }
+    $result = db_query("SELECT note_guid, nid FROM {evernote_nodes} WHERE evernote_fid = '%d'", $feed['evernote_fid']);
+    while ($row = db_fetch_array($result)) {
+      if (!in_array($row['note_guid'], $note_guids)) {
+        node_delete($row['nid']);
+      }
+    }
+    
+    // Begin adding and updating process
+    foreach ($notes->notes as $note) {
+      $changed = false;
+      //$changed = true; // DELETE THIS, FOR TESTING ONLY!
+      if ($evernote_node = db_fetch_array(db_query("SELECT * FROM {evernote_nodes} WHERE note_guid = '%s'", $note->guid))) {
+        if ($note->updateSequenceNum != $evernote_node['sequence_num']) {
+          $changed = true;
+        }
+      }
+      if (!$evernote_node || $changed) {
+        $note_info = $noteStore->getNote($token, $note->guid, 1, 1, 1, 1);
+        $updated_notes = true;
+        if ($changed) {
+          $node = node_load($evernote_node['nid']);
+        } else {
+          $node = new stdClass();
+          // Set published state if it's a new node
+          $node->status = 0;
+          if ($feed['published'] == 1) {
+            $node->status = 1;
+          }
+          
+          $node->uid = ($feed['add_as_uid'] > 0) ? $feed['add_as_uid'] : 1;
+          $node->format = $feed['format'];
+          $title = $note_info->title;
+          $title_field = $feed['title_field'];
+          $node->title = $title;
+          if ($title_field != 'title') {
+            $node->{$title_field}[0]['value'] = $title;
+          }
+          $node->type = $feed['content_type'];
+          $node->comment = variable_get('comment_'. $feed['content_type'], '0');
+          //$node->evernote_state = 'initial_add';
+          node_save($node);
+        }
+        
+        $node->taxonomy = array(); // Remove taxonomy terms so we don't trigger anything until the end
+        
+        // Delete old files before getting resources
+        $file_fields = array($feed['image_field'], $feed['file_field']);
+        foreach ($file_fields as $field) {
+          if ($field = content_fields($field)) {
+            if (isset($node->{$field['field_name']})) {
+              if (count($node->{$field['field_name']} > 0)) {
+                foreach ($node->{$field['field_name']} as $key => $file) {
+                  unset($node->{$field['field_name']}[$key]);
+                  //filefield_field_delete_file($file, $field);
+                  field_file_delete($file, TRUE);
+                }
+              }
+            }
+          }
+        }
+        node_save($node);
+        //$node = node_load($node->nid, $node->vid, TRUE); // Refresh file data
+        
+        // Get resources
+        
+        $ocr_content = '';
+        $ocr_array = array();
+        if (isset($note_info->resources)) {
+          foreach ($note_info->resources as $resource) {
+            $ocr_array = array(); // Reset
+            // Get OCR data - we're picking the first choice of each word's possibilities so it's more
+            // reader-friendly.
+            if (isset($resource->recognition->body)) {
+              $ocr_content_array = explode('</item>', $resource->recognition->body);
+              foreach ($ocr_content_array as $item) {
+                $possibles = explode('</t>', $item);
+                $ocr_array[] = strip_tags($possibles[0]);
+              }
+              $ocr_content .= implode(' ', $ocr_array);
+            }
+                
+            $extension = end(explode('/', $resource->mime));
+            $url = EVERNOTE_SPHOSTNAME .'/shard/'. $feed['shard_id'] .'/res/'. $resource->guid .'.'. $extension;
+            
+            $md5 = md5($resource->data->body);
+            $dir = file_directory_path() . '/evernote';
+            file_check_directory($dir, FILE_CREATE_DIRECTORY);
+            //$dir = file_create_path('evernote/'. $node->nid);
+            //evernote_create_dir($dir);
+            $filename = $md5 .'.'. $extension;
+            if ($resource->attributes->fileName != '') {
+              $filename = $resource->attributes->fileName;
+            }
+            $filepath =  $dir .'/'. $filename;
+            require_once('HTTP/Request.php');
+  
+            $r = new HTTP_Request($url);
+            $r->addHeader('Cookie','auth='. $token);
+            $r->sendRequest();
+            $page = $r->getResponseBody();
+            $ch = curl_init($url);
+            $fp = fopen($filepath, 'wb');
+            fwrite($fp, $page);
+            
+            // Save to filefield
+            if (in_array($extension, array('gif', 'png', 'jpg', 'jpeg'))) {
+              $field = $feed['image_field'];
+              if (!isset($image_field_i)) {
+                $image_field_i = 0;
+              }
+              $hashes[$md5] = array(
+                'num' => $image_field_i,
+                'extension' => $extension,
+                'field' => $field,
+                'original' => $filepath,
+                'type' => 'image',
+              );
+              $image_field_i++;
+            } else {
+              $field = $feed['file_field'];
+              if (!isset($file_field_i)) {
+                $file_field_i = 0;
+              }
+              $hashes[$md5] = array(
+                'num' => $file_field_i,
+                'extension' => $extension,
+                'field' => $field,
+                'original' => $filepath,
+                'type' => 'file',
+              );
+              $file_field_i++;
+            }
+              
+            $field = content_fields($field);
+            
+            //$path = media_mover_api_dir_path() .'/mm_cck/';
+            if ($path = $field['widget']['file_path']) {
+              if (module_exists('token')) {
+                global $user;
+                $path = token_replace($path, 'user', $user);
+              }
+              $path = '/'. $path;
+            }
+            // Allways return a good path
+            $destination_path = file_directory_path() . $path;
+            file_check_directory($destination_path, FILE_CREATE_DIRECTORY);
+            
+
+            // make sure we can access the file functions
+            module_load_include('inc', 'filefield', 'field_file' );
+          
+            // get the validators for this field
+            if ($field['widget']['module'] == 'imagefield') {
+              $validators = array_merge(filefield_widget_upload_validators($field), imagefield_widget_upload_validators($field));
+            }
+            else { $validators = filefield_widget_upload_validators($field);}
+          
+            // now get the new field
+            if (! $new_file = field_file_save_file($filepath, $validators, $destination_path)) {
+              watchdog('MM CCK', 'Could not save file with field_file_save_file() %file', array('%file' => print_r($file, true)), WATCHDOG_ERROR);
+              return;
+            }
+          
+            // we need to alter the file object slightly so it will display correctly
+            $new_file['data'] = array('description' => '');
+            // Do we list the file?
+            $new_file['list'] = $configuration['field_save_list'];
+          
+            // Add the file on to the node
+            // Do any files already exist on this node?
+            if (! is_array($node->{$field['field_name']})) {
+              $node->{$field['field_name']} = array($new_file);
+            }
+            elseif (! isset($node->{$field['field_name']}[0]))  {
+              $node->{$field['field_name']} = array($new_file);
+            }
+            // Files exist, append this file
+            else {
+              $node->{$field['field_name']}[] = $new_file;
+            }
+            
+          }
+        }
+        // End getting resources
+        node_save($node); // Refresh file data again
+        
+        unset($match);
+        preg_match('/<en-note(.*?)>(.*?)<\/en-note>/s',$note_info->content,$match); // Get the body
+        $body = $match[2];
+        
+        // Replace out all the resources with local images or remove them
+        // @TODO: Move this into a function to reduce repetition
+        preg_match_all('/<en-media(.*?)>(.*?)<\/en-media>/s', $body, $media_matches);
+        foreach ($media_matches[0] as $media_match) {
+          preg_match('/hash="(.*?)"/', $media_match, $hash);
+          $file_data = $hashes[$hash[1]];
+          if ($file_data['type'] == 'image') {
+            $body = str_replace($media_match, '<img class="evernote-img" src="'. base_path() . $node->{$file_data['field']}[$file_data['num']]['filepath'] .'" />', $body);
+          } else {
+            $body = str_replace($media_match, '', $body);
+          }
+          file_delete($file_data['original']);
+        }
+        preg_match_all('/<en-media(.*?)\/>/', $body, $media_matches);
+        foreach ($media_matches[0] as $media_match) {
+          preg_match('/hash="(.*?)"/', $media_match, $hash);
+          $file_data = $hashes[$hash[1]];
+          if ($file_data['type'] == 'image') {
+            $body = str_replace($media_match, '<img src="'. base_path() . $node->{$file_data['field']}[$file_data['num']]['filepath'] .'" />', $body);
+          } else {
+            $body = str_replace($media_match, '', $body);
+          }
+          file_delete($file_data['original']);
+        }
+        
+        // Replacement for breaks, so what appears looks more like what we input - particularly
+        // nice for Markdown
+        $body = str_replace(array('<div><br />'), array("\n"), $body);
+        $body = preg_replace('/<\/div>(.*?)\n(.*?)<div>/s', "\n", $body);
+        //$body = str_replace(array('<div>', '</div>'), array("\n", ''), $body);
+        $body = str_replace(array('<br/>', '<br />', '<br clear="none"/>', '</div>', '<div>'), array("\n", "\n",  "\n", "\n", ''), $body);
+        
+        // Filter executable code / markup
+        $code_delimiters_start = explode(',', variable_get('evernote_execute_start', '[c]'));
+        $code_delimiters_end = explode(',', variable_get('evernote_execute_end', '[/c]'));
+        foreach($code_delimiters_start as $key => $start) {
+          $end = $code_delimiters_end[$key];
+          $array = evernote_clean_up_delimiters(array($start, $end));
+          $body = preg_replace_callback('/'. $array[0] .'(.*?)'. $array[1] .'/s', "evernote_html_entity_decode", $body);
+        }
+        // Filter code blocks
+        $code_block_start = explode(',', variable_get('evernote_code_block_start', '[co]'));
+        $code_block_end = explode(',', variable_get('evernote_code_block_end', '[/co]'));
+        foreach($code_block_start as $key => $start) {
+          $end = $code_block_end[$key];
+          $array = evernote_clean_up_delimiters(array($start, $end));
+          $body = preg_replace_callback('/'. $array[0] .'(.*?)'. $array[1] .'/s', "evernote_code_block", $body);
+        }
+        // Class delimiters
+        $class_block_start = explode(',', variable_get('evernote_class_start', 'sclass:'));
+        $class_block_end = explode(',', variable_get('evernote_class_end', 'eclass'));
+        foreach($class_block_start as $key => $start) {
+          $end = $class_block_end[$key];
+          $array = evernote_clean_up_delimiters(array($start, $end));
+          $body = preg_replace_callback('/'. $array[0] .'(.*?)'. $array[1] .'/s', "evernote_class_wrap", $body);
+        }
+        
+        // Get ocr contents in
+        if ($feed['ocr_field'] != '') {
+          if ($feed['ocr_field'] == 'body') {
+            $body .= '<div class="evernote-ocr">'. $ocr_content .'</div>';
+          } else {
+            $node->{$feed['ocr_field']}[0]['value'] = $ocr_content;
+          }
+        }
+        
+        // Set URL field
+        if ($feed['url_field'] != '') {
+          $node->{$feed['url_field']}[0]['value'] = $note_info->attributes->sourceURL;
+        }
+
+        $node->body = $body;
+        $body_field = $feed['body_field'];
+        if ($body_field != 'body') {
+          $node->{$body_field}[0]['value'] = $body;
+          $node->{$body_field}[0]['format'] = $feed['format'];
+        }
+        $node->teaser = node_teaser($body);
+        node_save($node); // Save before doing taxonomy
+        
+        // Add to the evernote_node table
+        if ($changed) {
+          db_query("UPDATE {evernote_nodes} SET sequence_num = '%d' WHERE nid = '%d' AND evernote_fid = '%d'", $note->updateSequenceNum, $node->nid, $feed['evernote_fid']);
+        } else {
+          db_query("INSERT INTO {evernote_nodes} (evernote_fid, nid, note_guid, sequence_num) VALUES ('%d', '%d', '%s', '%d')", $feed['evernote_fid'], $node->nid, $note->guid, $note->updateSequenceNum);
+        }
+        
+        // Unset tags so we can re-add them
+        db_query("DELETE FROM {term_node} WHERE nid = '%d'", $node->nid);
+        $node->taxonomy = array();
+        // Add tags
+        foreach ($note_info->tagGuids as $tag_guid) {
+          $row = db_fetch_object(db_query("SELECT td.* FROM {evernote_terms} et LEFT JOIN {term_data} td ON et.tid = td.tid WHERE tag_guid = '%s'", $tag_guid));
+          //db_query("INSERT INTO {term_node} (nid, vid, tid) VALUES ('%d', '%d', '%d')", $node->nid, $node->vid, $row->tid);
+          $new_tags[$row->vid][] = $row->name;
+          //$node->taxonomy[] = $row;
+        }
+        foreach ($new_tags as $vid => $tag_list) {
+          $new_terms['tags'][$vid] = implode(',', $tag_list);
+        }
+        taxonomy_node_save($node, $new_terms);
+        $node->taxonomy = $new_terms;
+        
+        $data[$note->guid] = array($note->updateSequenceNum, $node->nid);
+        drupal_alter('evernote_save_node', $node, $feed, $body);
+        node_save($node);
+        
+      }
+    }
+    
+    // Create listing note
+    $result = db_query("SELECT n.nid, n.title FROM {evernote_nodes} en LEFT JOIN {node} n ON en.nid = n.nid WHERE en.evernote_fid = '%d' ORDER BY nid DESC ", $feed['evernote_fid']);
+    global $base_url;
+    $base_path = url('<front>', array('absolute' => TRUE));
+    $content = ''; // Reset
+    while ($row = db_fetch_array($result)) {
+      $line = '';
+      $full_url = url('node/'. $row['nid'], array('absolute' => TRUE));
+      $internal_url = 'internal:node/'. $row['nid'];
+      $line .= l($row['title'], 'node/'. $row['nid'], array('absolute' => TRUE));
+      $line .= ' - '. $base_path .'node/'. $row['nid'];
+      $content .= '<li>'. $line .'</li>';
+    }
+    
+    $content = 'Below are links to posts that have been pulled from Evernote to your site for easier linking between them.'. '<ul>'. $content .'</ul>';
+    
+    // Create or update a page with the feed's URLs on it
+    if ($updated_notes) {
+      $note_guid = variable_get('evernote_fid_'. $feed['evernote_fid'] .'_listing_guid', '');
+      unset($note);
+      $create_new_note = TRUE;
+      if ($note_guid != '') {
+        try {
+          $note = $noteStore->getNote($token, $note_guid, 1, 1, 1, 1);
+          $note->updated = '';
+          $create_new_note = FALSE;
+        } catch (Exception $e) {
+          $create_new_note = TRUE;
+        }
+      }
+      if (isset($note)) {
+        if ($note->active == 0) { // If it's been deleted
+          $create_new_note = TRUE;
+        }
+      }
+      if ($create_new_note) {
+        $note = new edam_type_Note();
+        if ($feed['notebook_guid']) {
+          $note->notebookGuid = $feed['notebook_guid'];
+        }
+        $note->title = 'Evernote Node URL listing for "'. $feed['name'] .' at '. url('<front>', array('absolute' => TRUE));
+        $note->content =
+          '<?xml version="1.0" encoding="UTF-8"?>' .
+          '<!DOCTYPE en-note SYSTEM "http://xml.evernote.com/pub/enml.dtd">' .
+          '<en-note>'. $content .'</en-note>';
+        $new_note = $noteStore->createNote($token, $note);
+        variable_set('evernote_fid_'. $feed['evernote_fid'] .'_listing_guid', $new_note->guid);
+      } else { // Update
+        $note->content =
+          '<?xml version="1.0" encoding="UTF-8"?>' .
+          '<!DOCTYPE en-note SYSTEM "http://xml.evernote.com/pub/enml.dtd">' .
+          '<en-note>'. $content .'</en-note>';
+        $noteStore->updateNote($token, $note);
+      }
+    }
+  } // End feed loop
+}
+
+// Found here: http://www.webmaster-talk.com/php-forum/21334-str_replace-only-once-occurence-only.html#post109511
+function evernote_str_replace_once($needle , $replace , $haystack){
+  // Looks for the first occurence of $needle in $haystack
+  // and replaces it with $replace.
+  $pos = strpos($haystack, $needle);
+  if ($pos === false) {
+      // Nothing found
+  return $haystack;
+  }
+  return substr_replace($haystack, $replace, $pos, strlen($needle));
+}
+
+function evernote_evernote_save_node_alter(&$node, $feed, &$body) {
+  $test = '';
+}
+
+function evernote_clean_up_delimiters($array) {
+  return str_replace(array('[', ']', '/', '>'), array('\[', '\]', '\/'), $array);
+}
+
+function evernote_html_entity_decode($matches) {
+  return html_entity_decode(strip_tags($matches[1]));
+}
+
+function evernote_class_wrap($matches) {
+  $array = explode(' ', $matches[1]);
+  $class = $array[0];
+  unset($array[0]);
+  $content = implode(' ', $array);
+  return '<div class="'. $class .'">'. $content .'</div>';
+}
+
+function evernote_code_block($matches) {
+  $content = $matches[1];
+  $content = trim($content, "\n");
+  return '<pre><code>'. $content .'</code></pre>';
+}
+
+function evernote_remove_tag_from_note($nid, $term_name) {
+echo 'starting delete';
+  $node = node_load($nid, NULL, TRUE);
+  if (isset($node->evernote['evernote_aid'])) {
+   echo ' account found';
+    $term = db_fetch_array(db_query("SELECT td.tid, td.name, et.tag_guid FROM {evernote_terms} et LEFT JOIN {term_data} td ON et.tid = td.tid WHERE td.name = '%s'", $term_name));
+    $account_info = evernote_get_account_settings($node->evernote['evernote_aid']);
+    if ($account_info['username'] != '' && $account_info['password'] != '') {
+      evernote_set_user_token_and_shard($account_info);
+    }
+    $noteStore = evernote_get_notestore_object($account_info['shard_id']);
+    $note = $noteStore->getNote($account_info['access_token'], $node->evernote['note_guid'], 1, 1, 1, 1);
+    foreach ($note->tagGuids as $key => $guid) {
+      if ($guid != $term['tag_guid']) {
+        $new_guids[] = $guid;
+      }
+    }
+    $note->tagGuids = $new_guids;
+    echo ' updating note';
+    $noteStore->updateNote($account_info['access_token'], $note);
+  }
+}
+
+
+function evernote_nodeapi(&$node, $op) {
+  global $evernote_nid;
+  //$new_data = array();
+  $test = '';
+  switch ($op) {
+    case 'insert':
+      //$evernote_nid = $node->nid;
+      break;
+    case 'delete':
+      db_query("DELETE FROM {evernote_nodes} WHERE nid = '%d'", $node->nid);
+      break;
+    case 'load':
+      $node->evernote = db_fetch_array(db_query("SELECT * FROM {evernote_nodes} n LEFT JOIN {evernote_feeds} f ON n.evernote_fid = f.evernote_fid WHERE nid = '%d'", $node->nid));
+      $test = '';
+      break;
+  }
+}
+
+/**
+ * Implementation of hook_perm().
+ */
+function evernote_perm() {
+  return array('administer evernote');
+}
